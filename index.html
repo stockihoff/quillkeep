@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#1d1915">
-<meta name="quillkeep-version" content="3.3">
+<meta name="quillkeep-version" content="3.5">
 <title>Quillkeep</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23201c17'/%3E%3Cpath d='M22 5c-6 2-11 8-12 16l-2 6 3-4c6-1 10-6 12-12-2 1-3 1-5 1 2-1 3-3 4-7z' fill='%23d9a441'/%3E%3C/svg%3E">
 <style>
@@ -908,6 +908,17 @@ label.form-row{display:flex;flex-direction:column;gap:3px;font-size:.78rem;color
   .run .scroll{overflow:visible;flex:none} .run-tab{min-height:0} .combat-embed{height:auto} .combat-embed .cb-list{max-height:none}
   .run-head{gap:8px} .run-clock{border:0;padding:0} .run-title{max-width:60vw}
 }
+/* full-screen layout that respects the iPhone/iPad notch and home indicator */
+#app{position:fixed;inset:0;height:auto;padding:0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);background:var(--bg)}
+.topbar{padding-top:calc(7px + env(safe-area-inset-top))}
+@media (max-width:760px){
+  #app{padding-bottom:0} body{overflow:hidden} main{overflow-y:auto;-webkit-overflow-scrolling:touch}
+  .rail{padding-bottom:calc(8px + env(safe-area-inset-bottom))}
+  .topbar{padding-top:calc(6px + env(safe-area-inset-top))}
+  .side-panel{padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
+  .toast,#toast{bottom:calc(84px + env(safe-area-inset-bottom))}
+}
+.tok{-webkit-text-security:disc;font-family:monospace}
 
 </style>
 </head>
@@ -4388,7 +4399,7 @@ function download(name, data, type) { const a = document.createElement('a'); a.h
 async function exportJSON() {
   toast('Preparing backup…');
   const assets = {}; for (const p of await Assets.list()) assets[p] = await Assets.dataURL(p);
-  download(`${safeName(W.meta.name)} backup ${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify({ app: 'quillkeep', version: 2, meta: W.meta, docs: W.docs, assets }), 'application/json');
+  download(`${safeName(W.meta.name)} backup ${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify({ app: 'quillkeep', version: 2, meta: { ...W.meta, publish: W.meta.publish ? { ...W.meta.publish, token: undefined } : undefined }, docs: W.docs, assets }), 'application/json');
 }
 function importJSON() {
   const inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.json,application/json';
@@ -6459,14 +6470,33 @@ command('Save this world to Google Drive', () => Store.pickDrive('save'));
 
 /* ================= Your Quillkeep website (GitHub Pages) & publishing ================= */
 const GitPub = {
-  cfg() { return Object.assign({ owner: '', repo: 'quillkeep', branch: 'main', token: '', handout: 'handout.html' }, lsGet('quillkeep.gh', {})); },
-  save(c) { lsSet('quillkeep.gh', c); },
+  /* where the settings come from, later wins: defaults → guessed from this website's address → saved in the world (so every device
+     opening the world from Google Drive has them) → this browser */
+  inferred() { const h = location.hostname; if (!/\.github\.io$/i.test(h)) return {}; const owner = h.split('.')[0], seg = location.pathname.split('/').filter(Boolean)[0]; return { owner, repo: seg && !/\.html$/i.test(seg) ? seg : `${owner}.github.io` }; },
+  cfg() {
+    const world = W.meta.publish || {}, local = lsGet('quillkeep.gh', {});
+    const c = Object.assign({ owner: '', repo: 'quillkeep', branch: 'main', token: '', handout: 'handout.html', shareToken: true }, this.inferred(), world, local);
+    // newest token wins, so a fresh token pasted on any device reaches every other device
+    if (world.token && (!local.token || (world.tokenAt || 0) > (local.tokenAt || 0))) { c.token = world.token; c.tokenAt = world.tokenAt || 0; }
+    c.token = String(c.token || '').replace(/\s+/g, '');
+    return c;
+  },
+  save(c) {
+    lsSet('quillkeep.gh', c);
+    const { owner, repo, branch, handout, shareToken } = c;
+    const next = { owner, repo, branch, handout, shareToken: shareToken !== false, ...(shareToken !== false && c.token ? { token: c.token, tokenAt: c.tokenAt || 0 } : {}) };
+    if (JSON.stringify(next) !== JSON.stringify(W.meta.publish || {})) { W.meta.publish = next; touchMeta(); }
+  },
+  /* first time a world is opened on a device that already has the website set up: carry the settings into the world */
+  syncToWorld() { const local = lsGet('quillkeep.gh', null); if (local?.token && (!W.meta.publish || (local.shareToken !== false && !W.meta.publish.token))) this.save(this.cfg()); },
+  mask(t) { t = String(t || ''); if (!t) return 'no token saved'; return `${t.slice(0, 15)}…${t.slice(-4)}, ${t.length} characters`; },
+  tokenLooksRight(t) { return /^(github_pat_[A-Za-z0-9_]{60,}|ghp_[A-Za-z0-9]{30,})$/.test(t); },
   ready() { const c = this.cfg(); return !!(c.owner && c.repo && c.token); },
   siteURL(c = this.cfg()) { if (!c.owner) return ''; const o = c.owner.toLowerCase(); return c.repo.toLowerCase() === `${o}.github.io` ? `https://${o}.github.io/` : `https://${o}.github.io/${c.repo}/`; },
   headers(c) { return { Authorization: `Bearer ${c.token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }; },
   async err(r, c) {
     let m = ''; try { m = (await r.json()).message || ''; } catch { }
-    if (r.status === 401) return new Error("GitHub didn't accept the access token. It may have expired: make a new one.");
+    if (r.status === 401) return new Error(`GitHub didn't accept the access token (${this.mask(c.token)}). It may have expired or been deleted, or it was pasted incompletely. Make a new one and paste it in Settings → Online.`);
     if (r.status === 404) return new Error(`Couldn't find ${c.owner}/${c.repo}, or the token isn't allowed to see it.`);
     if (r.status === 403) return new Error('The token isn\'t allowed to change files. Give it "Contents: Read and write" on this repository.');
     return new Error(`GitHub: ${m || r.statusText}`);
@@ -6531,16 +6561,27 @@ SETTINGS.online = function (el) {
         <label>Branch <input data-gh="branch" value="${esc(c.branch)}"></label>
         <label>Handout file name <input data-gh="handout" value="${esc(c.handout)}" title="Rename it to something hard to guess if you want only people with the link to find it"></label>
       </div>
-      <label class="form-row">Access token <span class="hint">· kept only in this browser, never in your world files</span><input type="password" data-gh="token" value="${esc(c.token)}" placeholder="github_pat_…" autocomplete="off"></label>
+      <label class="form-row">Access token <span class="hint">· saved: ${esc(GitPub.mask(c.token))}${c.token && !GitPub.tokenLooksRight(c.token) ? ' · <b class="warn-text">this doesn\'t look like a GitHub token</b>' : ''}</span><span class="row"><input id="ghTok" class="grow tok" type="text" placeholder="Paste a new token: github_pat_…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore><button class="btn small" id="ghTokSave">Save token</button></span></label>
+      <label class="check"><input type="checkbox" id="ghShare" ${c.shareToken !== false ? 'checked' : ''}> Use these settings on all my devices <span class="hint">· the token is kept with your world in your private Google Drive folder. It's never put in handouts or backup exports</span></label>
       ${site ? `<p class="help">Website: <a href="${esc(site)}" target="_blank" rel="noopener">${esc(site)}</a> · Handout: <a href="${esc(site + (c.handout || 'handout.html'))}" target="_blank" rel="noopener">${esc(c.handout || 'handout.html')}</a></p>` : ''}
       <div class="row wrap"><button class="btn" data-p="test">Test connection</button><button class="btn primary" data-p="handout">${ico('cloud-upload', 14)} Publish player handout</button>${GDrive.clientId ? '<button class="btn" data-p="config">Save Drive setup to website</button>' : ''}</div>
       ${W.meta.lastPublished ? `<p class="help">Handout last published ${esc(ago(W.meta.lastPublished))}.</p>` : ''}
+      ${GitPub.ready() ? `<div class="eyebrow" style="margin-top:12px">Updating Quillkeep</div><p class="help">When you get a new version, pick its files here (<code>index.html</code>, <code>sw.js</code> and anything else that came with it) and Quillkeep uploads them to your website for you. Every device gets the update the next time it opens. This is Quillkeep ${esc(APP_VERSION)}.</p><button class="btn" id="ghUpdate">${ico('upload', 14)} Update the app on my website…</button>` : ''}
     </div>
     <div class="on-card"><div class="on-h">${ico('smartphone', 18)} <b>Install on a phone or tablet</b></div>
       <p class="help">Open your Quillkeep website in the phone's browser. <b>iPhone/iPad</b> (Safari): Share → <b>Add to Home Screen</b>. <b>Android</b> (Chrome): ⋮ → <b>Install app</b>. It gets its own icon, opens full screen and keeps working offline. Then choose <b>World menu → Open a world from Google Drive</b>.</p>
       ${site ? `<div class="copyline"><code>${esc(site)}</code><button class="ghost small" data-copy="${esc(site)}">Copy link</button></div>` : ''}</div>`;
   const re = () => SETTINGS.online(el);
   $$('[data-gh]', el).forEach(i => i.oninput = () => { const x = GitPub.cfg(); x[i.dataset.gh] = i.value.trim(); GitPub.save(x); });
+  $('#ghTokSave', el).onclick = async () => {
+    const t = $('#ghTok', el).value.replace(/\s+/g, ''); if (!t) return;
+    if (!GitPub.tokenLooksRight(t) && !(await confirmModal('That doesn\'t look like a GitHub token', '<p>GitHub tokens start with <code>github_pat_</code> and are about 90 characters long. Save it anyway?</p>', 'Save anyway', 'Cancel'))) return;
+    const x = GitPub.cfg(); x.token = t; x.tokenAt = Date.now(); GitPub.save(x);
+    try { const j = await GitPub.test(); toast(`Token saved. Connected to ${j.full_name}`); } catch (e) { modalInfo('Token saved, but GitHub said no', `<p>${esc(e.message)}</p>`); }
+    re();
+  };
+  $('#ghShare', el).onchange = e => { const x = GitPub.cfg(); x.shareToken = e.target.checked; GitPub.save(x); if (!x.shareToken) toast('The token now stays only in this browser'); };
+  $('#ghUpdate', el)?.addEventListener('click', updateWebsiteFiles);
   $$('[data-gh]', el).forEach(i => i.onchange = re);
   $('#gcidS', el)?.addEventListener('change', e => { GDrive.setClientId(e.target.value); re(); });
   $$('[data-copy]', el).forEach(b => b.onclick = () => { navigator.clipboard?.writeText(b.dataset.copy); toast('Copied'); });
@@ -6564,6 +6605,26 @@ SETTINGS.online = function (el) {
 };
 command('Publish player handout to my website', publishHandout);
 command('Online settings (Google Drive, website)', () => openSettings('online'));
+
+/* upload a new version of the app (files you were sent) straight to your GitHub Pages site */
+function updateWebsiteFiles() {
+  const inp = document.createElement('input'); inp.type = 'file'; inp.multiple = true;
+  inp.onchange = async () => {
+    const files = [...inp.files]; if (!files.length) return;
+    const allowed = /^(index\.html|sw\.js|manifest\.webmanifest|README\.md|icon-192\.png|icon-512\.png|icon-maskable-512\.png|apple-touch-icon\.png)$/i;
+    const bad = files.filter(f => !allowed.test(f.name));
+    if (bad.length) { modalInfo('Those don\'t look like Quillkeep files', `<p>Pick the files from the <b>Quillkeep website</b> folder: index.html, sw.js and so on. Not uploaded: ${bad.map(f => esc(f.name)).join(', ')}</p>`); return; }
+    const idx = files.find(f => /^index\.html$/i.test(f.name));
+    if (idx) { const head = await idx.slice(0, 4000).text(); const v = head.match(/quillkeep-version" content="([^"]+)"/); if (!v) { modalInfo('That index.html isn\'t Quillkeep', '<p>Nothing was uploaded.</p>'); return; }
+      if (!(await confirmModal(`Update your website to Quillkeep ${v[1]}?`, `<p>You're on ${esc(APP_VERSION)} now. Your world isn't touched; only the app files on GitHub are replaced.</p>`, 'Update', 'Cancel'))) return; }
+    toast(`Uploading ${plural(files.length, 'file')}…`);
+    try {
+      for (const f of files) { const path = /\.png$/i.test(f.name) ? 'icons/' + f.name : f.name; await GitPub.putFile(path, f, `Update Quillkeep: ${f.name}`); }
+      toast('Website updated. It goes live within a couple of minutes; reload Quillkeep to get it.', ['Reload', () => location.reload()]);
+    } catch (e) { modalInfo('Couldn\'t update the website', `<p>${esc(e.message)}</p>`); }
+  };
+  inp.click();
+}
 
 /* ================= Phones & tablets: pinch zoom, installable web app ================= */
 /* Two-finger pinch for pan/zoom views. get() -> {k,tx,ty}; set(k,tx,ty); cancel() drops any one-finger drag. */
@@ -6600,7 +6661,7 @@ function addPinch(el, { get, set, cancel, limits = () => [0.1, 5] }) {
   add('meta', { name: 'apple-mobile-web-app-capable', content: 'yes' });
   add('meta', { name: 'mobile-web-app-capable', content: 'yes' });
   add('meta', { name: 'apple-mobile-web-app-title', content: 'Quillkeep' });
-  add('meta', { name: 'apple-mobile-web-app-status-bar-style', content: 'black' });
+  add('meta', { name: 'apple-mobile-web-app-status-bar-style', content: 'black-translucent' });
   if (!('serviceWorker' in navigator)) return;
   addEventListener('load', () => {
     navigator.serviceWorker.register('sw.js').then(reg => {
@@ -6646,7 +6707,7 @@ function renderShell() {
   $('#newBtn').onclick = ev => newMenu(ev.currentTarget);
   $('#settingsBtn').onclick = () => openSettings();
   $('#diceBtn').onclick = () => toggleDiceTray(); $('#combatBtn').onclick = () => toggleCombat(); $('#pvBtn').onclick = ev => pvMenu(ev.currentTarget);
-  updatePVBtn(); refreshCombat();
+  updatePVBtn(); refreshCombat(); try { GitPub.syncToWorld(); } catch { }
   $$('.rail-btn').forEach(b => b.onclick = () => { UI.welcomed = true; saveUI(); go(b.dataset.view); });
   Store.setStatus(Store.status === 'saved' ? 'saved' : Store.status === 'error' ? 'error' : 'dirty', Store.dir ? (Store.status === 'saved' ? 'Saved' : 'Saving…') : Store.pending ? 'Not connected' : 'Browser only');
   if (Store.pending && !Store.dir) showBanner(`Reconnect to your world folder <b>${esc(Store.pending.name)}</b> to keep saving there.`, [['Reconnect', () => Store.reconnect()], ['Not now', hideBanner]]);
