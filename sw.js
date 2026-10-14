@@ -1,7 +1,7 @@
 /* Quillkeep service worker: makes the app open offline and installable.
    The app page is fetched fresh when online (so updates arrive straight away) and from the cache when offline.
    Your world is never stored here; it lives in Google Drive and in the browser's own storage. */
-const CACHE = 'quillkeep-3.5-7da11e99';
+const CACHE = 'quillkeep-4.0-7bb30741';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k.startsWith('quillkeep-') && k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())); });
